@@ -1,0 +1,197 @@
+//////////////////////////////////////////////////////////////////////////////////////////
+//   _  _ ____ _  _ ___  ____                                                           //
+//   |_/  |__| |\ | |  \ |  |    This file belongs to Kando, the cross-platform         //
+//   | \_ |  | | \| |__/ |__|    pie menu. Read more on github.com/kando-menu/kando     //
+//                                                                                      //
+//////////////////////////////////////////////////////////////////////////////////////////
+
+// SPDX-FileCopyrightText: Simon Schneegans <code@simonschneegans.de>
+// SPDX-FileCopyrightText: Kevin Langman <klangman@gmail.com>
+// SPDX-License-Identifier: MIT
+
+'use strict';
+
+const Gio = imports.gi.Gio;
+const GLib = imports.gi.GLib;
+const Meta = imports.gi.Meta;
+
+const Settings = imports.ui.settings;
+
+const Shortcuts = require('./src/Shortcuts.js');
+const InputManipulator = require('./src/InputManipulator.js');
+
+// This is the DBus interface which will be exported by this extension. It provides
+// methods to get information about the currently focused window and the mouse pointer
+// position. It also allows to move the mouse pointer, simulate key strokes and bind
+// shortcuts.
+const DBUS_INTERFACE = `
+<node>
+  <interface name="org.Cinnamon.Extensions.KandoIntegration">
+    <method name="GetWMInfo">
+      <arg name="windowTitle" type="s" direction="out" />
+      <arg name="windowClass" type="s" direction="out" />
+      <arg name="pointerX"    type="i" direction="out" />
+      <arg name="pointerY"    type="i" direction="out" />
+    </method>
+    <method name="MovePointer">
+      <arg name="dx"   type="i" direction="in" />
+      <arg name="dy"   type="i" direction="in" />
+    </method>
+    <method name="SimulateKeys">
+      <arg name="keys" type="a(ibi)" direction="in" />
+    </method>
+    <method name="BindShortcut">
+      <arg name="shortcut" type="s" direction="in" />
+      <arg name="success"  type="b" direction="out" />
+    </method>
+    <method name="UnbindShortcut">
+      <arg name="shortcut" type="s" direction="in" />
+      <arg name="success"  type="b" direction="out" />
+    </method>
+    <method name="UnbindAllShortcuts">
+    </method>
+    <signal name="ShortcutPressed">
+      <arg name="shortcut" type="s"/>
+    </signal>
+  </interface>
+</node>`;
+
+class KandoIntegration {
+
+  constructor(metaData){
+    this.meta = metaData;
+  }
+
+  // Exports the DBus interface.
+  enable() {
+
+    // Do nothing on X11.
+    if (!Meta.is_wayland_compositor()) {
+      return;
+    }
+    this._settings = new Settings.ExtensionSettings(this, this.meta.uuid)
+
+    this._dbus = Gio.DBusExportedObject.wrapJSObject(DBUS_INTERFACE, this);
+    this._dbus.export(Gio.DBus.session, '/org/cinnamon/extensions/KandoIntegration');
+
+    this._shortcuts        = new Shortcuts.Shortcuts();
+    this._inputManipulator = new InputManipulator.InputManipulator();
+
+    this._shortcuts.connect('activated', (s, shortcut) => {
+      this._dbus.emit_signal('ShortcutPressed', new GLib.Variant('(s)', [shortcut]));
+    });
+
+    // Re-bind all shortcuts that were bound before the extension was disabled.
+    this._settings.getValue('shortcuts').forEach((shortcut) => {
+      this._shortcuts.bind(shortcut);
+    });
+  }
+
+  // Unbinds all shortcuts and unexports the DBus interface.
+  disable() {
+
+    // Do nothing on X11.
+    if (!Meta.is_wayland_compositor()) {
+      return;
+    }
+
+    this._dbus.flush();
+    this._dbus.unexport();
+    this._dbus = null;
+
+    this._shortcuts.destroy();
+    this._shortcuts = null;
+
+    this._settings = null;
+
+    this._inputManipulator = null;
+  }
+
+  // Returns the title and class of the currently focused window as well as the current
+  // pointer position.
+  GetWMInfo() {
+    let windowName  = '';
+    let windowClass = '';
+
+    for (let actor of global.get_window_actors()) {
+      if (actor.meta_window.has_focus()) {
+        windowName  = actor.meta_window.get_title();
+        windowClass = actor.meta_window.get_wm_class();
+
+        break;
+      }
+    }
+
+    const [x, y] = global.get_pointer();
+
+    return [
+      windowName, windowClass, Math.round(x / global.ui_scale),
+      Math.round(y / global.ui_scale)
+    ];
+  }
+
+  // Warps the mouse pointer by the given distance.
+  MovePointer(dx, dy) {
+    this._inputManipulator.movePointer(dx/global.ui_scale, dy/global.ui_scale);
+  }
+
+  // Simulates the given key strokes. The keys argument is an array of arrays. Each
+  // sub-array contains three elements: The keysym, a boolean indicating whether the key
+  // should be pressed or released and an optional delay in milliseconds.
+  SimulateKeys(keys) {
+    this._inputManipulator.simulateKeys(keys);
+  }
+
+  // Binds the given shortcut. When it's pressed, the "ShortcutPressed" signal will be
+  // emitted.
+  BindShortcut(shortcut) {
+    const success = this._shortcuts.bind(shortcut);
+
+    if (success) {
+      const shortcuts = this._settings.getValue('shortcuts');
+      shortcuts.push(shortcut);
+      this._settings.setValue('shortcuts', shortcuts);
+    }
+
+    return success;
+  }
+
+  // Unbinds a previously bound shortcut.
+  UnbindShortcut(shortcut) {
+    const success = this._shortcuts.unbind(shortcut);
+
+    if (success) {
+      const shortcuts = this._settings.getValue('shortcuts');
+      this._settings.setValue('shortcuts', shortcuts.filter((s) => s !== shortcut));
+    }
+
+    return success;
+  }
+
+  // Unbinds all previously bound shortcuts.
+  UnbindAllShortcuts() {
+    this._shortcuts.unbindAll();
+    this._settings.setValue('shortcuts', []);
+  }
+}
+
+let extension = null;
+
+function enable() {
+  if (extension) {
+    extension.enable();
+  }
+}
+
+function disable() {
+  if (extension) {
+    extension.disable();
+    extension = null;
+  }
+}
+
+function init(metadata) {
+  if(!extension) {
+    extension = new KandoIntegration(metadata);
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "uuid": "KandoCinnamonIntegration@kando.menu",
+  "name": "Kando Cinnamon Integration",
+  "version": "0.5.0",
+  "description": "This extension is required for Kando to work on Wayland. It allows Kando to bind global shortcuts, and provides information about your currently focused application window and the position of your mouse pointer.",
+  "url": "https://github.com/kando-menu",
+  "website": "https://github.com/kando-menu",
+  "hide-configuration": true,
+  "cinnamon-version": ["6.0"]
+}
